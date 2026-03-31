@@ -33,3 +33,12 @@ To securely send the unlock request, the app needs your "Cookie"—a temporary c
 4. Leave the app open! It will turn on a countdown timer and automatically secure your unlock slot when Beijing midnight strikes. 
 
 *Note: Make sure your screen stays on and your phone doesn't go to sleep while waiting, or the timer might get paused by Android!*
+
+## 🛠 Developer Build Instructions
+If you want to compile the project yourself:
+1. Clone this repository locally.
+2. Open the project in **Android Studio**.
+3. Allow Gradle to automatically sync the Kotlin DSL scripts.
+4. Ensure you have the Android SDK compiled for API 34.
+5. Hit **Run** or use the terminal command `./gradlew assembleDebug`.
+6. The generated APK will be found in `app/build/outputs/apk/debug/`.

@@ -1,31 +1,35 @@
 # HyperOS AAU (Auto Unlocker)
 
-A native Android application designed to automate the Xiaomi/HyperOS Bootloader Unlock slot reservation process by sending precision-timed requests at exactly Beijing midnight.
+A simple, easy-to-use Android app that helps you auto-reserve a bootloader unlock slot for your Xiaomi or HyperOS device. Securing an unlock slot is notoriously difficult because spots run out seconds after midnight. This app does the heavy lifting for you by sending your request at exactly the right moment!
 
-## 🚀 Features
+## ✨ Why use this app?
 
-- **JIT Latency Detection**: Measures server ping exactly 10 seconds before midnight for pinpoint accuracy.
-- **NTP Time Synchronization**: Utilizes `pool.ntp.org` to bypass your phone's clock drift and calculate true Beijing standard time down to the millisecond.
-- **Dual-Burst Bracketing Strategy**: Calculates mathematical packet arrival times and dual-fires packets at exactly [-50ms, +50ms] of 00:00:00.000 for maximum success rate while passing anti-spam matrices.
-- **Native Android Compose UI**: Clean, standalone mobile interface.
+- **Smart Timing**: Instead of guessing when to press the button, the app measures how long it takes for your internet to talk to Xiaomi's servers and sends the request exactly when it needs to.
+- **Perfect Clock Sync**: Your phone's clock might be a few seconds off. This app talks to global atomic clocks to make sure it runs at exact Beijing Midnight, down to the millisecond.
+- **Safe & Accurate**: Instead of spamming the server and getting blocked, it sends just two perfectly timed requests at the exact split-second the spots open.
+- **Runs on your Phone**: No need to leave a PC running all night. Just set it up on your phone and leave it open!
 
-## 📋 Requirements
-- An Android device running Android 8.0+
-- A valid, active Xiaomi Community Account that meets the 30-day activity requirements for unlocking.
-- The captured Session Cookie (instructions below).
+## 📋 What you need
+- An Android device.
+- A valid Xiaomi Community Account that meets the 30-day activity requirement for unlocking.
+- Your secret "Cookie" (instructions below).
 
-## 🔑 How to get your BBS Cookie
-To authorize the unlock requests, this application needs your raw session cookie string from the official Xiaomi Community app. 
+## 🔑 How to get your "Cookie"
+To securely send the unlock request, the app needs your "Cookie"—a temporary code that proves you are logged into your Xiaomi account. 
 
-1. Install a network sniffer on your phone or PC (e.g., **HTTP Toolkit**, **PCAPdroid**, or **Charles Proxy**).
-2. Start intercepting traffic.
-3. Open the official Xiaomi Community app and navigate to the **Unlock Bootloader** apply screen.
-4. Go back to your sniffer and search for a request made to:
+1. Install a free network sniffer app on your phone (like **HTTP Toolkit** or **PCAPdroid**).
+2. Turn on the sniffer so it starts recording your internet traffic.
+3. Open the official **Xiaomi Community app** and go to the **Unlock Bootloader** page.
+4. Go back to your sniffer app and search for a connection to:
    `https://sgp-api.buy.mi.com/bbs/api/global/apply/bl-auth`
-5. Look at the **Headers** of that request. Copy the entire string next to the `Cookie:` header (it usually looks like long alphanumeric strings separated by semicolons).
-6. Paste that string straight into the **Cookie String** box in this Android application.
+5. Tap on that request and look for the **Headers** section. Find the line that says `Cookie:`. 
+6. Copy the long jumble of text next to `Cookie:`.
+7. Paste that text into the **Cookie String** box in this Auto Unlocker app!
 
-## ⚙️ Build and Run
-Clone this project and open it in **Android Studio**. Build the project and deploy the `.apk` directly to your Android device. 
+## 🚀 How to Use
+1. Download the app to your phone.
+2. Paste your Cookie into the app.
+3. Tap **"Verify & Start Process"**.
+4. Leave the app open! It will turn on a countdown timer and automatically secure your unlock slot when Beijing midnight strikes. 
 
-*Note: Ensure your device does not put the application to sleep during the countdown, or timing precision will fail.*
+*Note: Make sure your screen stays on and your phone doesn't go to sleep while waiting, or the timer might get paused by Android!*

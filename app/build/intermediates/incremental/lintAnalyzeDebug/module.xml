@@ -1,0 +1,19 @@
+<lint-module
+    format="1"
+    dir="D:\Projects\XiaomiCommunityUnlockApp\app"
+    name=":app"
+    type="APP"
+    maven="Xiaomi Unlock:app:"
+    agpVersion="8.2.2"
+    buildFolder="build"
+    bootClassPath="C:\Users\pc\scoop\apps\android-clt\14742923\platforms\android-34\android.jar;C:\Users\pc\scoop\apps\android-clt\14742923\build-tools\34.0.0\core-lambda-stubs.jar"
+    javaSourceLevel="17"
+    compileTarget="android-34"
+    neverShrinking="true">
+  <lintOptions
+      abortOnError="true"
+      absolutePaths="true"
+      checkReleaseBuilds="true"
+      explainIssues="true"/>
+  <variant name="debug"/>
+</lint-module>

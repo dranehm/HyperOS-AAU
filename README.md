@@ -17,7 +17,7 @@ A simple, easy-to-use Android app that helps you auto-reserve a bootloader unloc
 ## 🔑 How to get your "Cookie"
 To securely send the unlock request, the app needs your "Cookie"—a temporary code that proves you are logged into your Xiaomi account. 
 
-1. Install a free network sniffer app on your phone (like **HTTP Toolkit** or **PCAPdroid**).
+1. Install a free network sniffer app on your phone (like **HTTP Toolkit**, **HTTP Sniffer** or **PCAPdroid**).
 2. Turn on the sniffer so it starts recording your internet traffic.
 3. Open the official **Xiaomi Community app** and go to the **Unlock Bootloader** page.
 4. Go back to your sniffer app and search for a connection to:

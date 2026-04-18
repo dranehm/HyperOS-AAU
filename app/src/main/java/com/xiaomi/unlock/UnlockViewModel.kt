@@ -35,6 +35,7 @@ class UnlockViewModel : ViewModel() {
     var isRunning by mutableStateOf(false)
     var isTestingCookie by mutableStateOf(false)
     var caffeineMode by mutableStateOf(false)
+    var maxTriggers by mutableStateOf("4")
 
     var latencyMs by mutableStateOf<Long?>(null)
     var ntpOffsetMs by mutableStateOf<Long?>(null)
@@ -217,19 +218,32 @@ class UnlockViewModel : ViewModel() {
             log("[Latency] Final measured latency: ${lat}ms")
 
             // 5. Calculate Spam Bracket Timings
+            val triggerCount = (maxTriggers.toIntOrNull() ?: 4).coerceAtLeast(1)
+            log("[Config] Firing $triggerCount trigger(s)")
+            
             // Base arrival time = targetUtcMs
             // We want arrival at 00:00:00, so we send at Base Send Time = target - latency
             val baseSendTimeUtcMs = targetUtcMs - lat
 
-            // Brackets: 4 waves sequentially spread across [-60ms, -20ms, +20ms, +60ms]
-            val wave1SendTimeUtcMs = baseSendTimeUtcMs - 60L
+            // Generate wave offsets: evenly spread across a bracket around midnight
+            // For N triggers, spread from -60ms to +60ms
+            val bracketHalfMs = 60L
+            val offsets = if (triggerCount == 1) {
+                listOf(0L)
+            } else {
+                (0 until triggerCount).map { i ->
+                    -bracketHalfMs + (2 * bracketHalfMs * i) / (triggerCount - 1)
+                }
+            }
+            
+            val wave1SendTimeUtcMs = baseSendTimeUtcMs + offsets.first()
 
             withContext(Dispatchers.Main) {
                 waves.clear()
-                waves.add(WaveStatus(1, "-60ms"))
-                waves.add(WaveStatus(2, "-20ms"))
-                waves.add(WaveStatus(3, "+20ms"))
-                waves.add(WaveStatus(4, "+60ms"))
+                offsets.forEachIndexed { idx, offsetMs ->
+                    val label = if (offsetMs >= 0) "+${offsetMs}ms" else "${offsetMs}ms"
+                    waves.add(WaveStatus(idx + 1, label))
+                }
             }
 
             // Wait exactly for Wave 1
@@ -253,42 +267,23 @@ class UnlockViewModel : ViewModel() {
             withContext(Dispatchers.Main) { countdownText = "FIRING" }
             log("===")
 
-            // Wave 1 (-60ms)
-            launch(Dispatchers.IO) {
-                val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
-                log("[Spam 1] Launched at $ts CST (-60ms bracket)")
-                withContext(Dispatchers.Main) { if (waves.isNotEmpty()) waves[0].state = WaveState.SENDING }
-                sendWave(1, 0)
+            // Fire all waves dynamically
+            offsets.forEachIndexed { idx, offsetMs ->
+                if (idx > 0) {
+                    val gapMs = offsets[idx] - offsets[idx - 1]
+                    delay(gapMs)
+                }
+                val waveId = idx + 1
+                launch(Dispatchers.IO) {
+                    val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
+                    val label = if (offsetMs >= 0) "+${offsetMs}ms" else "${offsetMs}ms"
+                    log("[Spam $waveId] Launched at $ts CST ($label bracket)")
+                    withContext(Dispatchers.Main) { if (idx in waves.indices) waves[idx].state = WaveState.SENDING }
+                    sendWave(waveId, 0)
+                }
             }
 
-            // Wave 2 (-20ms)
-            delay(40)
-            launch(Dispatchers.IO) {
-                val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
-                log("[Spam 2] Launched at $ts CST (-20ms bracket)")
-                withContext(Dispatchers.Main) { if (waves.size > 1) waves[1].state = WaveState.SENDING }
-                sendWave(2, 0)
-            }
-
-            // Wave 3 (+20ms)
-            delay(40)
-            launch(Dispatchers.IO) {
-                val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
-                log("[Spam 3] Launched at $ts CST (+20ms bracket)")
-                withContext(Dispatchers.Main) { if (waves.size > 2) waves[2].state = WaveState.SENDING }
-                sendWave(3, 0)
-            }
-
-            // Wave 4 (+60ms)
-            delay(40)
-            launch(Dispatchers.IO) {
-                val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
-                log("[Spam 4] Launched at $ts CST (+60ms bracket)")
-                withContext(Dispatchers.Main) { if (waves.size > 3) waves[3].state = WaveState.SENDING }
-                sendWave(4, 0)
-            }
-
-            delay(2000) // Wait for responses
+            delay(3000) // Wait for responses
             log("[Done] Process Complete.")
             releaseWakeLock()
             isRunning = false

@@ -23,6 +23,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
@@ -195,6 +197,29 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
             modifier = Modifier.fillMaxWidth(),
             enabled = !viewModel.isRunning,
             singleLine = true,
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = OrangeMain,
+                focusedLabelColor = OrangeMain,
+                cursorColor = OrangeMain
+            )
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // --- Max Triggers Input ---
+        OutlinedTextField(
+            value = viewModel.maxTriggers,
+            onValueChange = { newVal ->
+                if (newVal.isEmpty() || newVal.all { it.isDigit() }) {
+                    viewModel.maxTriggers = newVal
+                }
+            },
+            label = { Text("Max Triggers") },
+            placeholder = { Text("4") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !viewModel.isRunning,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             colors = OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = OrangeMain,
                 focusedLabelColor = OrangeMain,

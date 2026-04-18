@@ -29,16 +29,19 @@ jobs:
           key: gradle-${{ hashFiles('**/*.gradle.kts', '**/gradle-wrapper.properties') }}
           restore-keys: gradle-
 
-      - name: Decode keystore
+      - name: Generate release keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/release.keystore
+          keytool -genkeypair \
+            -alias release \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -keystore app/release.keystore \
+            -storepass 'g@lapate13' \
+            -keypass 'g@lapate13' \
+            -dname "CN=HyperOS AAU, OU=Dev, O=Dev, L=Unknown, ST=Unknown, C=US"
 
       - name: Build signed release APK
-        env:
-          KEYSTORE_PATH: release.keystore
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: chmod +x gradlew && ./gradlew assembleRelease
 
       - name: Extract version name

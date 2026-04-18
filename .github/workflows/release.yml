@@ -53,12 +53,9 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}-build.${{ github.run_number }}
-          name: "Release v${{ steps.version.outputs.version }} (Build #${{ github.run_number }})"
+          tag_name: v${{ steps.version.outputs.version }}
+          name: "Xiaomi Unlock Automator v${{ steps.version.outputs.version }}"
           body: |
-            Automated release from commit ${{ github.sha }}
-
-            ### Changes
             ${{ github.event.head_commit.message }}
           files: app/build/outputs/apk/release/*.apk
           draft: false

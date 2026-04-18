@@ -1,9 +1,15 @@
 package com.xiaomi.unlock
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.os.Build
+import android.os.PowerManager
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.app.NotificationCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
@@ -28,13 +34,17 @@ class UnlockViewModel : ViewModel() {
     var cookie by mutableStateOf("")
     var isRunning by mutableStateOf(false)
     var isTestingCookie by mutableStateOf(false)
-    
+    var caffeineMode by mutableStateOf(false)
+
     var latencyMs by mutableStateOf<Long?>(null)
     var ntpOffsetMs by mutableStateOf<Long?>(null)
     var countdownText by mutableStateOf("Ready")
-    
+
     val logs = mutableStateListOf<String>()
     val waves = mutableStateListOf<WaveStatus>()
+
+    private var appContext: Context? = null
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
@@ -46,6 +56,82 @@ class UnlockViewModel : ViewModel() {
     private val ntpServer = "pool.ntp.org"
 
     private val beijingTz = TimeZone.getTimeZone("Asia/Shanghai")
+
+    companion object {
+        private const val CHANNEL_ID = "unlock_result_channel"
+        private const val NOTIFICATION_ID = 1001
+    }
+
+    fun init(context: Context) {
+        appContext = context.applicationContext
+        createNotificationChannel()
+    }
+
+    private fun createNotificationChannel() {
+        val ctx = appContext ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Unlock Results",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Notifications for bootloader unlock attempt results"
+                enableVibration(true)
+            }
+            val notificationManager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    private fun showSuccessNotification(message: String) {
+        val ctx = appContext ?: return
+        try {
+            val notification = NotificationCompat.Builder(ctx, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("✅ Unlock Approved!")
+                .setContentText(message)
+                .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+                .setPriority(NotificationCompat.PRIORITY_HIGH)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
+                .setAutoCancel(true)
+                .build()
+
+            val notificationManager = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.notify(NOTIFICATION_ID, notification)
+        } catch (e: SecurityException) {
+            log("[Notify] Permission denied — could not show notification")
+        }
+    }
+
+    private fun acquireWakeLock() {
+        val ctx = appContext ?: return
+        try {
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "HyperOSAAU::UnlockWakeLock"
+            ).apply {
+                acquire(4 * 60 * 60 * 1000L) // 4 hour timeout safety
+            }
+            log("[WakeLock] Acquired — CPU will stay active")
+        } catch (e: Exception) {
+            log("[WakeLock] Error: ${e.message}")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    log("[WakeLock] Released")
+                }
+            }
+            wakeLock = null
+        } catch (e: Exception) {
+            log("[WakeLock] Release error: ${e.message}")
+        }
+    }
 
     private fun log(message: String) {
         viewModelScope.launch(Dispatchers.Main) {
@@ -62,16 +148,18 @@ class UnlockViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             isRunning = true
             isTestingCookie = true
+            acquireWakeLock()
             log("=" * 40)
             log("Starting Xiaomi BL Unlock Automator (Pro Mode)...")
-            
+
             // 1. Test Cookie
             log("[Test] Verifying cookie...")
             val isValid = testCookie()
             isTestingCookie = false
-            
+
             if (!isValid) {
                 log("[!] Cookie rejected (need login). It may have expired. Please paste a new one.")
+                releaseWakeLock()
                 isRunning = false
                 return@launch
             }
@@ -87,10 +175,10 @@ class UnlockViewModel : ViewModel() {
             val targetUtcMs = getNextBeijingMidnightMs()
             val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'CST'", Locale.US).apply { timeZone = beijingTz }
             log("[Target] ${sdf.format(Date(targetUtcMs))} (Beijing Midnight)")
-            
+
             // 3. Wait until exactly 23:59:50 Beijing Time to accurately measure ping
             val targetPingTimeUtcMs = targetUtcMs - 10_000L
-            
+
             while (isRunning) {
                 val nowAccurate = System.currentTimeMillis() + (ntpOffsetMs ?: 0L)
                 val remainingToPing = targetPingTimeUtcMs - nowAccurate
@@ -118,24 +206,24 @@ class UnlockViewModel : ViewModel() {
                     break
                 }
             }
-            
-            if(!isRunning) return@launch // cancelled
-            
+
+            if(!isRunning) { releaseWakeLock(); return@launch } // cancelled
+
             // 4. Measure JIT Latency
             log("[Latency] 23:59:50 reached! Measuring final latency...")
             withContext(Dispatchers.Main) { countdownText = "Pinging..." }
             val lat = measureLatency()
             latencyMs = lat
             log("[Latency] Final measured latency: ${lat}ms")
-            
+
             // 5. Calculate Spam Bracket Timings
             // Base arrival time = targetUtcMs
             // We want arrival at 00:00:00, so we send at Base Send Time = target - latency
             val baseSendTimeUtcMs = targetUtcMs - lat
-            
+
             // Brackets: 4 waves sequentially spread across [-60ms, -20ms, +20ms, +60ms]
             val wave1SendTimeUtcMs = baseSendTimeUtcMs - 60L
-            
+
             withContext(Dispatchers.Main) {
                 waves.clear()
                 waves.add(WaveStatus(1, "-60ms"))
@@ -143,14 +231,14 @@ class UnlockViewModel : ViewModel() {
                 waves.add(WaveStatus(3, "+20ms"))
                 waves.add(WaveStatus(4, "+60ms"))
             }
-            
+
             // Wait exactly for Wave 1
             while (isRunning) {
                 val nowAccurate = System.currentTimeMillis() + (ntpOffsetMs ?: 0L)
                 val remainingToFire = wave1SendTimeUtcMs - nowAccurate
-                
+
                 if (remainingToFire <= 0) break
-                
+
                 if (remainingToFire > 2000) {
                     withContext(Dispatchers.Main) { countdownText = String.format("Fire in %.2fs", remainingToFire / 1000.0) }
                     delay(50)
@@ -160,11 +248,11 @@ class UnlockViewModel : ViewModel() {
                     break
                 }
             }
-            if(!isRunning) return@launch
-            
+            if(!isRunning) { releaseWakeLock(); return@launch }
+
             withContext(Dispatchers.Main) { countdownText = "FIRING" }
             log("===")
-            
+
             // Wave 1 (-60ms)
             launch(Dispatchers.IO) {
                 val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
@@ -172,7 +260,7 @@ class UnlockViewModel : ViewModel() {
                 withContext(Dispatchers.Main) { if (waves.isNotEmpty()) waves[0].state = WaveState.SENDING }
                 sendWave(1, 0)
             }
-            
+
             // Wave 2 (-20ms)
             delay(40)
             launch(Dispatchers.IO) {
@@ -181,7 +269,7 @@ class UnlockViewModel : ViewModel() {
                 withContext(Dispatchers.Main) { if (waves.size > 1) waves[1].state = WaveState.SENDING }
                 sendWave(2, 0)
             }
-            
+
             // Wave 3 (+20ms)
             delay(40)
             launch(Dispatchers.IO) {
@@ -190,7 +278,7 @@ class UnlockViewModel : ViewModel() {
                 withContext(Dispatchers.Main) { if (waves.size > 2) waves[2].state = WaveState.SENDING }
                 sendWave(3, 0)
             }
-            
+
             // Wave 4 (+60ms)
             delay(40)
             launch(Dispatchers.IO) {
@@ -199,17 +287,24 @@ class UnlockViewModel : ViewModel() {
                 withContext(Dispatchers.Main) { if (waves.size > 3) waves[3].state = WaveState.SENDING }
                 sendWave(4, 0)
             }
-            
+
             delay(2000) // Wait for responses
             log("[Done] Process Complete.")
+            releaseWakeLock()
             isRunning = false
             withContext(Dispatchers.Main) { countdownText = "Done" }
         }
     }
-    
+
     fun stopProcess() {
         isRunning = false
+        releaseWakeLock()
         log("[!] User aborted.")
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        releaseWakeLock()
     }
 
     private operator fun String.times(n: Int): String {
@@ -237,10 +332,10 @@ class UnlockViewModel : ViewModel() {
             val msg = json.optString("msg", "")
             val data = json.optJSONObject("data")
             val result = data?.optInt("apply_result", -1) ?: -1
-            
+
             val meaning = getResultMeaning(result)
             log("[Test] HTTP ${resp.code} | msg=$msg | result=$result $meaning")
-            
+
             msg != "need login"
         } catch (e: Exception) {
             log("[Test] Error: ${e.message}")
@@ -300,10 +395,10 @@ class UnlockViewModel : ViewModel() {
             val reqBody = "{\"is_retry\":false}".toRequestBody("application/json; charset=utf-8".toMediaType())
             val req = buildHeaders(Request.Builder().url(unlockUrl).post(reqBody)).build()
             val resp = client.newCall(req).execute()
-            
+
             val body = resp.body?.string() ?: ""
             val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date())
-            
+
             try {
                 val json = JSONObject(body)
                 val msg = json.optString("msg", "?")
@@ -311,7 +406,14 @@ class UnlockViewModel : ViewModel() {
                 val result = data?.optInt("apply_result", -1) ?: -1
                 val meaning = getResultMeaning(result)
                 log("[Wave $waveId] $ts CST | HTTP ${resp.code} | $msg | result=$result $meaning")
-                
+
+                // Notify on success
+                if (result == 1) {
+                    showSuccessNotification("Bootloader unlock slot secured successfully! (Wave $waveId at $ts CST)")
+                } else if (result == 2) {
+                    showSuccessNotification("Bootloader unlock was already approved. You're all set!")
+                }
+
                 withContext(Dispatchers.Main) {
                     if (waveIndex in waves.indices) {
                         if (result == 1 || result == 2) waves[waveIndex].state = WaveState.SUCCESS
@@ -329,7 +431,7 @@ class UnlockViewModel : ViewModel() {
                     }
                 }
             }
-            
+
         } catch (e: Exception) {
             log("[Wave $waveId] ERROR: ${e.message}")
             withContext(Dispatchers.Main) {

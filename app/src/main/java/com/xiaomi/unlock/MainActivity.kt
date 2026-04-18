@@ -1,8 +1,13 @@
 package com.xiaomi.unlock
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -21,6 +26,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.style.TextAlign
+import androidx.core.content.ContextCompat
 
 val OrangeMain = Color(0xFFFF6900)
 val DarkBackground = Color(0xFF141414)
@@ -30,9 +36,39 @@ val TextGray = Color(0xFFAAAAAA)
 class MainActivity : ComponentActivity() {
     private val viewModel: UnlockViewModel by viewModels()
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { /* granted or not, we proceed either way */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize ViewModel with app context for wake lock and notifications
+        viewModel.init(applicationContext)
+
+        // Request notification permission on Android 13+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED
+            ) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
         setContent {
+            // Sync caffeine mode with window FLAG_KEEP_SCREEN_ON
+            val caffeine = viewModel.caffeineMode
+            DisposableEffect(caffeine) {
+                if (caffeine) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                onDispose {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+            }
+
             MaterialTheme(
                 colorScheme = darkColorScheme(
                     primary = OrangeMain,
@@ -94,8 +130,51 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
                 value = viewModel.ntpOffsetMs?.let { "${it}ms" } ?: "--"
             )
         }
-        
-        Spacer(modifier = Modifier.height(24.dp))
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // --- Caffeine Mode Toggle ---
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (viewModel.caffeineMode) Color(0xFF2A1F00) else SurfaceColor
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        text = "☕ Caffeine Mode",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = if (viewModel.caffeineMode) OrangeMain else Color.White
+                    )
+                    Text(
+                        text = "Keep screen awake during process",
+                        fontSize = 11.sp,
+                        color = TextGray
+                    )
+                }
+                Switch(
+                    checked = viewModel.caffeineMode,
+                    onCheckedChange = { viewModel.caffeineMode = it },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White,
+                        checkedTrackColor = OrangeMain,
+                        uncheckedThumbColor = TextGray,
+                        uncheckedTrackColor = SurfaceColor
+                    )
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
 
         // --- Countdown Display ---
         Text(
@@ -104,7 +183,7 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
             fontWeight = FontWeight.Bold,
             color = if (viewModel.isRunning) OrangeMain else Color.White,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(bottom = 24.dp).fillMaxWidth()
+            modifier = Modifier.padding(bottom = 16.dp).fillMaxWidth()
         )
 
         // --- Cookie Input ---
@@ -122,7 +201,7 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
                 cursorColor = OrangeMain
             )
         )
-        
+
         Spacer(modifier = Modifier.height(16.dp))
 
         // --- Action Buttons ---
@@ -218,7 +297,7 @@ fun WaveCard(wave: WaveStatus) {
         WaveState.FULL -> Color(0xFFF56C6C)    // Red
         WaveState.ERROR -> Color(0xFF909399)   // Gray
     }
-    
+
     val textColor = if (wave.state == WaveState.IDLE) TextGray else Color.White
 
     Card(
@@ -236,10 +315,10 @@ fun WaveCard(wave: WaveStatus) {
             Text(text = wave.offset, fontSize = 11.sp, color = textColor)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = wave.resultText, 
-                fontSize = 10.sp, 
-                fontWeight = FontWeight.Bold, 
-                color = textColor, 
+                text = wave.resultText,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = textColor,
                 textAlign = TextAlign.Center
             )
         }

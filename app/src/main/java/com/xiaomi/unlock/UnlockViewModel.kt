@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.apache.commons.net.ntp.NTPUDPClient
@@ -34,11 +35,16 @@ class UnlockViewModel : ViewModel() {
     var cookie by mutableStateOf("")
     var isRunning by mutableStateOf(false)
     var isTestingCookie by mutableStateOf(false)
+    var isTestingProxy by mutableStateOf(false)
     var caffeineMode by mutableStateOf(false)
     var maxTriggers by mutableStateOf("4")
+    var proxyAddress by mutableStateOf("")        // e.g. "socks5://127.0.0.1:1080"
+    var timingOffsetMsStr by mutableStateOf("0")  // ±ms manual calibration offset
+    var bracketWidthMsStr by mutableStateOf("50") // wave spread window in ms
 
     var latencyMs by mutableStateOf<Long?>(null)
     var ntpOffsetMs by mutableStateOf<Long?>(null)
+    var proxyRttMs by mutableStateOf<Long?>(null)
     var countdownText by mutableStateOf("Ready")
 
     val logs = mutableStateListOf<String>()
@@ -47,14 +53,37 @@ class UnlockViewModel : ViewModel() {
     private var appContext: Context? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    private val client = OkHttpClient.Builder()
+    // Built with HTTP/2 + optional proxy — rebuilt via rebuildClient() before each process run.
+    private var client = OkHttpClient.Builder()
         .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
         .build()
+
+    private fun rebuildClient() {
+        val builder = OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .protocols(listOf(Protocol.HTTP_2, Protocol.HTTP_1_1))
+        parseProxy(proxyAddress)?.let { builder.proxy(it) }
+        client = builder.build()
+    }
+
+    private fun parseProxy(address: String): java.net.Proxy? {
+        if (address.isBlank()) return null
+        return try {
+            val uri = java.net.URI(address.trim())
+            val type = when (uri.scheme?.lowercase()) {
+                "socks5", "socks" -> java.net.Proxy.Type.SOCKS
+                "http", "https"   -> java.net.Proxy.Type.HTTP
+                else -> return null
+            }
+            java.net.Proxy(type, java.net.InetSocketAddress(uri.host, uri.port))
+        } catch (e: Exception) { null }
+    }
 
     private val userAgent = "okhttp/4.12.0"
     private val unlockUrl = "https://sgp-api.buy.mi.com/bbs/api/global/apply/bl-auth"
-    private val ntpServer = "pool.ntp.org"
 
     private val beijingTz = TimeZone.getTimeZone("Asia/Shanghai")
 
@@ -66,6 +95,25 @@ class UnlockViewModel : ViewModel() {
     fun init(context: Context) {
         appContext = context.applicationContext
         createNotificationChannel()
+        loadPreferences()
+    }
+
+    private fun loadPreferences() {
+        val prefs = appContext?.getSharedPreferences("unlock_prefs", Context.MODE_PRIVATE) ?: return
+        proxyAddress      = prefs.getString("proxyAddress", "") ?: ""
+        timingOffsetMsStr = prefs.getString("timingOffsetMs", "0") ?: "0"
+        bracketWidthMsStr = prefs.getString("bracketWidthMs", "50") ?: "50"
+        maxTriggers       = prefs.getString("maxTriggers", "4") ?: "4"
+    }
+
+    private fun savePreferences() {
+        val prefs = appContext?.getSharedPreferences("unlock_prefs", Context.MODE_PRIVATE) ?: return
+        prefs.edit()
+            .putString("proxyAddress", proxyAddress)
+            .putString("timingOffsetMs", timingOffsetMsStr)
+            .putString("bracketWidthMs", bracketWidthMsStr)
+            .putString("maxTriggers", maxTriggers)
+            .apply()
     }
 
     private fun createNotificationChannel() {
@@ -140,6 +188,37 @@ class UnlockViewModel : ViewModel() {
         }
     }
 
+    fun testProxy() {
+        viewModelScope.launch(Dispatchers.IO) {
+            isTestingProxy = true
+            rebuildClient()
+            val label = proxyAddress.ifBlank { "direct (no proxy)" }
+            log("[Proxy] Testing via $label ...")
+            val times = mutableListOf<Long>()
+            for (i in 1..3) {
+                try {
+                    val t0 = System.currentTimeMillis()
+                    val req = Request.Builder().url(unlockUrl).head().build()
+                    client.newCall(req).execute().close()
+                    times.add(System.currentTimeMillis() - t0)
+                } catch (e: Exception) {
+                    log("[Proxy] Attempt $i failed: ${e.message}")
+                }
+            }
+            withContext(Dispatchers.Main) {
+                if (times.isNotEmpty()) {
+                    val minRtt = times.minOrNull()!!
+                    proxyRttMs = minRtt
+                    log("[Proxy] ✅ OK! Min RTT: ${minRtt}ms | avg: ${times.average().toLong()}ms")
+                } else {
+                    proxyRttMs = null
+                    log("[Proxy] ❌ All requests failed — check proxy address")
+                }
+                isTestingProxy = false
+            }
+        }
+    }
+
     fun startProcess() {
         if (cookie.isBlank()) {
             log("[!] Cookie cannot be empty.")
@@ -150,6 +229,8 @@ class UnlockViewModel : ViewModel() {
             isRunning = true
             isTestingCookie = true
             acquireWakeLock()
+            rebuildClient()
+            savePreferences()
             log("=" * 40)
             log("Starting Xiaomi BL Unlock Automator (Pro Mode)...")
 
@@ -177,14 +258,37 @@ class UnlockViewModel : ViewModel() {
             val sdf = SimpleDateFormat("yyyy-MM-dd HH:mm:ss 'CST'", Locale.US).apply { timeZone = beijingTz }
             log("[Target] ${sdf.format(Date(targetUtcMs))} (Beijing Midnight)")
 
-            // 3. Wait until exactly 23:59:50 Beijing Time to accurately measure ping
+            // 3. Wait until exactly 23:59:50 Beijing Time to accurately measure ping.
+            //    Also fires a connection pre-warm at T-30s with keepalive pings every 5s.
             val targetPingTimeUtcMs = targetUtcMs - 10_000L
+            var warmupFired = false
+            var nextKeepalivePingMs = Long.MAX_VALUE
 
             while (isRunning) {
                 val nowAccurate = System.currentTimeMillis() + (ntpOffsetMs ?: 0L)
                 val remainingToPing = targetPingTimeUtcMs - nowAccurate
 
                 if (remainingToPing <= 0) break
+
+                // Fire pre-warm at T-30s; then keepalive pings every 5s until T-2s
+                if (!warmupFired && remainingToPing <= 30_000) {
+                    warmupFired = true
+                    log("[Warmup] T-30s: Establishing TLS connection + keepalive pings every 5s...")
+                    launch(Dispatchers.IO) {
+                        try {
+                            client.newCall(Request.Builder().url(unlockUrl).head().build()).execute().close()
+                        } catch (e: Exception) { /* ignore */ }
+                    }
+                    nextKeepalivePingMs = System.currentTimeMillis() + 5_000L
+                }
+                if (warmupFired && remainingToPing > 2_000 && System.currentTimeMillis() >= nextKeepalivePingMs) {
+                    launch(Dispatchers.IO) {
+                        try {
+                            client.newCall(Request.Builder().url(unlockUrl).head().build()).execute().close()
+                        } catch (e: Exception) { /* ignore */ }
+                    }
+                    nextKeepalivePingMs = System.currentTimeMillis() + 5_000L
+                }
 
                 if (remainingToPing > 60_000) {
                     val h = remainingToPing / 3600_000
@@ -224,16 +328,17 @@ class UnlockViewModel : ViewModel() {
 
             // 5. Calculate Spam Bracket Timings
             val triggerCount = (maxTriggers.toIntOrNull() ?: 4).coerceAtLeast(1)
-            log("[Config] Firing $triggerCount trigger(s)")
-            
-            // Send at (midnight - one-way latency) so the request ARRIVES at midnight.
-            // Previously used full RTT here (bug: was 2× too early/late).
-            val baseSendTimeUtcMs = targetUtcMs - lat
+            val bracketMs = bracketWidthMsStr.toLongOrNull()?.coerceIn(10L, 1000L) ?: 50L
+            val timingOffset = timingOffsetMsStr.toLongOrNull() ?: 0L
+            log("[Config] Firing $triggerCount trigger(s) over ${bracketMs}ms bracket")
+            if (timingOffset != 0L) log("[Config] Manual timing offset: ${if (timingOffset > 0) "+" else ""}${timingOffset}ms")
 
-            // Spread waves from 0ms to +120ms AFTER midnight arrival time.
+            // Send at (midnight - one-way latency + user offset) so the request ARRIVES at/after midnight.
+            val baseSendTimeUtcMs = targetUtcMs - lat + timingOffset
+
+            // Spread waves from 0ms to +bracketMs AFTER midnight arrival time.
             // All waves are biased to arrive AFTER the slot opens (never before midnight),
             // maximising the chance of hitting the quota window.
-            val bracketMs = 120L
             val offsets = if (triggerCount == 1) {
                 listOf(0L)
             } else {
@@ -250,22 +355,6 @@ class UnlockViewModel : ViewModel() {
                     val label = "+${offsetMs}ms"
                     waves.add(WaveStatus(idx + 1, label))
                 }
-            }
-
-            // Pre-warm the TLS/HTTP connection 2 seconds before wave 1 fires,
-            // so the actual unlock requests reuse an already-open connection.
-            val warmupTimeMs = wave1SendTimeUtcMs - 2000L
-            while (isRunning) {
-                val nowAccurate = System.currentTimeMillis() + (ntpOffsetMs ?: 0L)
-                if (nowAccurate >= warmupTimeMs) break
-                delay(50)
-            }
-            if (isRunning) {
-                log("[Warmup] Pre-warming connection at 23:59:58...")
-                try {
-                    val req = Request.Builder().url(unlockUrl).head().build()
-                    client.newCall(req).execute().close()
-                } catch (e: Exception) { /* ignore — main waves will still fire */ }
             }
 
             // Wait exactly for Wave 1
@@ -366,17 +455,28 @@ class UnlockViewModel : ViewModel() {
     }
 
     private fun getNtpOffset(): Long {
-        return try {
-            val ntpClient = NTPUDPClient()
-            ntpClient.setDefaultTimeout(Duration.ofMillis(5000))
-            ntpClient.open()
-            val info = ntpClient.getTime(InetAddress.getByName(ntpServer))
-            info.computeDetails()
-            ntpClient.close()
-            info.offset ?: 0L
-        } catch (e: Exception) {
-            log("[NTP Error] ${e.message} - Using 0 offset")
+        val servers = listOf("pool.ntp.org", "time.cloudflare.com", "time.google.com")
+        val offsets = mutableListOf<Long>()
+        for (server in servers) {
+            try {
+                val ntpClient = NTPUDPClient()
+                ntpClient.setDefaultTimeout(Duration.ofMillis(3000))
+                ntpClient.open()
+                val info = ntpClient.getTime(InetAddress.getByName(server))
+                info.computeDetails()
+                ntpClient.close()
+                info.offset?.let { offsets.add(it) }
+            } catch (e: Exception) {
+                log("[NTP] $server unavailable: ${e.message?.take(40)}")
+            }
+        }
+        return if (offsets.isEmpty()) {
+            log("[NTP] All servers failed — using 0 offset")
             0L
+        } else {
+            offsets.sorted()[offsets.size / 2].also {
+                log("[NTP] ${offsets.size}/3 servers responded → median offset: ${it}ms")
+            }
         }
     }
 

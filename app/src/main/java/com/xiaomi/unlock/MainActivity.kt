@@ -121,15 +121,22 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
         // --- Status Cards Section ---
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             StatusCard(
                 title = "Latency",
-                value = viewModel.latencyMs?.let { "${it}ms" } ?: "--"
+                value = viewModel.latencyMs?.let { "${it}ms" } ?: "--",
+                modifier = Modifier.weight(1f)
             )
             StatusCard(
                 title = "NTP Offset",
-                value = viewModel.ntpOffsetMs?.let { "${it}ms" } ?: "--"
+                value = viewModel.ntpOffsetMs?.let { "${it}ms" } ?: "--",
+                modifier = Modifier.weight(1f)
+            )
+            StatusCard(
+                title = "Proxy RTT",
+                value = viewModel.proxyRttMs?.let { "${it}ms" } ?: "--",
+                modifier = Modifier.weight(1f)
             )
         }
 
@@ -227,7 +234,88 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
             )
         )
 
-        Spacer(modifier = Modifier.height(16.dp))
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // --- Proxy Address (optional) ---
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = viewModel.proxyAddress,
+                onValueChange = { viewModel.proxyAddress = it },
+                label = { Text("Proxy (optional)") },
+                placeholder = { Text("socks5://127.0.0.1:1080") },
+                modifier = Modifier.weight(1f),
+                enabled = !viewModel.isRunning,
+                singleLine = true,
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = OrangeMain,
+                    focusedLabelColor = OrangeMain,
+                    cursorColor = OrangeMain
+                )
+            )
+            Button(
+                onClick = { viewModel.testProxy() },
+                enabled = !viewModel.isTestingProxy && !viewModel.isRunning,
+                colors = ButtonDefaults.buttonColors(containerColor = OrangeMain),
+                modifier = Modifier.height(56.dp)
+            ) {
+                Text(if (viewModel.isTestingProxy) "..." else "Test", fontSize = 13.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // --- Timing Offset + Bracket Width ---
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedTextField(
+                value = viewModel.timingOffsetMsStr,
+                onValueChange = { newVal ->
+                    if (newVal.isEmpty() || newVal == "-" || newVal.toLongOrNull() != null) {
+                        viewModel.timingOffsetMsStr = newVal
+                    }
+                },
+                label = { Text("Offset (ms)") },
+                placeholder = { Text("0") },
+                modifier = Modifier.weight(1f),
+                enabled = !viewModel.isRunning,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                supportingText = { Text("+late / -early", fontSize = 10.sp, color = TextGray) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = OrangeMain,
+                    focusedLabelColor = OrangeMain,
+                    cursorColor = OrangeMain
+                )
+            )
+            OutlinedTextField(
+                value = viewModel.bracketWidthMsStr,
+                onValueChange = { newVal ->
+                    if (newVal.isEmpty() || newVal.all { it.isDigit() }) {
+                        viewModel.bracketWidthMsStr = newVal
+                    }
+                },
+                label = { Text("Bracket (ms)") },
+                placeholder = { Text("50") },
+                modifier = Modifier.weight(1f),
+                enabled = !viewModel.isRunning,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                supportingText = { Text("wave spread", fontSize = 10.sp, color = TextGray) },
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = OrangeMain,
+                    focusedLabelColor = OrangeMain,
+                    cursorColor = OrangeMain
+                )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
 
         // --- Action Buttons ---
         if (!viewModel.isRunning) {
@@ -291,13 +379,11 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
 }
 
 @Composable
-fun StatusCard(title: String, value: String) {
+fun StatusCard(title: String, value: String, modifier: Modifier = Modifier) {
     Card(
         colors = CardDefaults.cardColors(containerColor = SurfaceColor),
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-        modifier = Modifier
-            .width(150.dp)
-            .height(80.dp)
+        modifier = modifier.height(80.dp)
     ) {
         Column(
             modifier = Modifier

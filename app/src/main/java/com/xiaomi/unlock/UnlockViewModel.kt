@@ -153,9 +153,9 @@ class UnlockViewModel : ViewModel() {
             log("=" * 40)
             log("Starting Xiaomi BL Unlock Automator (Pro Mode)...")
 
-            // 1. Test Cookie
+            // 1. Test Cookie — also captures real POST RTT to the backend
             log("[Test] Verifying cookie...")
-            val isValid = testCookie()
+            val (isValid, cookieRttMs) = testCookie()
             isTestingCookie = false
 
             if (!isValid) {
@@ -164,7 +164,7 @@ class UnlockViewModel : ViewModel() {
                 isRunning = false
                 return@launch
             }
-            log("[✓] Cookie is valid! Setting up...")
+            log("[✓] Cookie is valid! Setting up... (baseline POST RTT: ${cookieRttMs}ms)")
 
             // 2. Measure initial NTP
             log("[NTP] Syncing clock initially...")
@@ -203,36 +203,42 @@ class UnlockViewModel : ViewModel() {
                     withContext(Dispatchers.Main) {
                         countdownText = String.format("Ping in %.3fs", remainingToPing / 1000.0)
                     }
-                    delay(remainingToPing)
+                    delay(remainingToPing.coerceAtLeast(0L))
                     break
                 }
             }
 
             if(!isRunning) { releaseWakeLock(); return@launch } // cancelled
 
-            // 4. Measure JIT Latency
+            // 4. Measure JIT Latency (HEAD to actual API path at 23:59:50)
             log("[Latency] 23:59:50 reached! Measuring final latency...")
             withContext(Dispatchers.Main) { countdownText = "Pinging..." }
-            val lat = measureLatency()
-            latencyMs = lat
-            log("[Latency] Final measured latency: ${lat}ms")
+            val headLat = measureLatency()
+            // Use the best available one-way latency estimate:
+            //   - cookieRttMs/2: real POST RTT measured earlier (includes CDN→backend)
+            //   - headLat/2: fresh HEAD RTT measured just now (CDN path only, but fresher)
+            // Take the larger of the two to avoid arriving too early.
+            val lat = maxOf(cookieRttMs, headLat) / 2
+            latencyMs = lat * 2 // Display the full RTT to the user
+            log("[Latency] HEAD min RTT: ${headLat}ms | POST RTT: ${cookieRttMs}ms → one-way estimate: ${lat}ms")
 
             // 5. Calculate Spam Bracket Timings
             val triggerCount = (maxTriggers.toIntOrNull() ?: 4).coerceAtLeast(1)
             log("[Config] Firing $triggerCount trigger(s)")
             
-            // Base arrival time = targetUtcMs
-            // We want arrival at 00:00:00, so we send at Base Send Time = target - latency
+            // Send at (midnight - one-way latency) so the request ARRIVES at midnight.
+            // Previously used full RTT here (bug: was 2× too early/late).
             val baseSendTimeUtcMs = targetUtcMs - lat
 
-            // Generate wave offsets: evenly spread across a bracket around midnight
-            // For N triggers, spread from -60ms to +60ms
-            val bracketHalfMs = 60L
+            // Spread waves from 0ms to +120ms AFTER midnight arrival time.
+            // All waves are biased to arrive AFTER the slot opens (never before midnight),
+            // maximising the chance of hitting the quota window.
+            val bracketMs = 120L
             val offsets = if (triggerCount == 1) {
                 listOf(0L)
             } else {
                 (0 until triggerCount).map { i ->
-                    -bracketHalfMs + (2 * bracketHalfMs * i) / (triggerCount - 1)
+                    (bracketMs * i) / (triggerCount - 1)
                 }
             }
             
@@ -241,9 +247,25 @@ class UnlockViewModel : ViewModel() {
             withContext(Dispatchers.Main) {
                 waves.clear()
                 offsets.forEachIndexed { idx, offsetMs ->
-                    val label = if (offsetMs >= 0) "+${offsetMs}ms" else "${offsetMs}ms"
+                    val label = "+${offsetMs}ms"
                     waves.add(WaveStatus(idx + 1, label))
                 }
+            }
+
+            // Pre-warm the TLS/HTTP connection 2 seconds before wave 1 fires,
+            // so the actual unlock requests reuse an already-open connection.
+            val warmupTimeMs = wave1SendTimeUtcMs - 2000L
+            while (isRunning) {
+                val nowAccurate = System.currentTimeMillis() + (ntpOffsetMs ?: 0L)
+                if (nowAccurate >= warmupTimeMs) break
+                delay(50)
+            }
+            if (isRunning) {
+                log("[Warmup] Pre-warming connection at 23:59:58...")
+                try {
+                    val req = Request.Builder().url(unlockUrl).head().build()
+                    client.newCall(req).execute().close()
+                } catch (e: Exception) { /* ignore — main waves will still fire */ }
             }
 
             // Wait exactly for Wave 1
@@ -258,7 +280,7 @@ class UnlockViewModel : ViewModel() {
                     delay(50)
                 } else {
                     withContext(Dispatchers.Main) { countdownText = String.format("Fire in %.3fs", remainingToFire / 1000.0) }
-                    delay(remainingToFire)
+                    delay(remainingToFire.coerceAtLeast(0L))
                     break
                 }
             }
@@ -275,9 +297,10 @@ class UnlockViewModel : ViewModel() {
                 }
                 val waveId = idx + 1
                 launch(Dispatchers.IO) {
-                    val ts = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
-                    val label = if (offsetMs >= 0) "+${offsetMs}ms" else "${offsetMs}ms"
-                    log("[Spam $waveId] Launched at $ts CST ($label bracket)")
+                    val sendTs = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(System.currentTimeMillis() + (ntpOffsetMs ?: 0L)))
+                    val estArrivalMs = System.currentTimeMillis() + (ntpOffsetMs ?: 0L) + lat
+                    val arrivalTs = SimpleDateFormat("HH:mm:ss.SSS", Locale.US).apply { timeZone = beijingTz }.format(Date(estArrivalMs))
+                    log("[Wave $waveId] Sent $sendTs → est. arrival $arrivalTs CST (+${offsetMs}ms bracket)")
                     withContext(Dispatchers.Main) { if (idx in waves.indices) waves[idx].state = WaveState.SENDING }
                     sendWave(waveId, 0)
                 }
@@ -317,11 +340,15 @@ class UnlockViewModel : ViewModel() {
             .header("User-Agent", userAgent)
     }
 
-    private fun testCookie(): Boolean {
+    // Returns (isValid, rttMs). The RTT is measured on the actual POST to the unlock URL,
+    // giving a true end-to-end latency that includes CDN→backend forwarding.
+    private fun testCookie(): Pair<Boolean, Long> {
         return try {
+            val t0 = System.currentTimeMillis()
             val reqBody = "{\"is_retry\":false}".toRequestBody("application/json; charset=utf-8".toMediaType())
             val req = buildHeaders(Request.Builder().url(unlockUrl).post(reqBody)).build()
             val resp = client.newCall(req).execute()
+            val rttMs = System.currentTimeMillis() - t0
             val body = resp.body?.string() ?: ""
             val json = JSONObject(body)
             val msg = json.optString("msg", "")
@@ -329,12 +356,12 @@ class UnlockViewModel : ViewModel() {
             val result = data?.optInt("apply_result", -1) ?: -1
 
             val meaning = getResultMeaning(result)
-            log("[Test] HTTP ${resp.code} | msg=$msg | result=$result $meaning")
+            log("[Test] HTTP ${resp.code} | msg=$msg | result=$result $meaning | RTT=${rttMs}ms")
 
-            msg != "need login"
+            Pair(msg != "need login", rttMs)
         } catch (e: Exception) {
             log("[Test] Error: ${e.message}")
-            false
+            Pair(false, 0L)
         }
     }
 
@@ -354,19 +381,22 @@ class UnlockViewModel : ViewModel() {
     }
 
     private fun measureLatency(): Long {
+        // Target the actual API path (not root) so the measurement reflects
+        // the full CDN→backend round trip, not just the CDN edge response.
         val times = mutableListOf<Long>()
         for (i in 1..5) {
             try {
                 val t0 = System.currentTimeMillis()
-                val req = Request.Builder().url("https://sgp-api.buy.mi.com").head().build()
+                val req = Request.Builder().url(unlockUrl).head().build()
                 client.newBuilder().callTimeout(5, java.util.concurrent.TimeUnit.SECONDS).build().newCall(req).execute().close()
                 times.add(System.currentTimeMillis() - t0)
             } catch (e: Exception) {
                 // Ignore failure
             }
         }
+        // Use minimum (best-case RTT, closest to true network latency without queuing jitter)
         return if (times.isNotEmpty()) {
-            times.sum() / times.size
+            times.minOrNull()!!
         } else {
             log("[Latency] Could not measure — defaulting to 300ms")
             300L

@@ -37,6 +37,7 @@ class UnlockViewModel : ViewModel() {
     var isTestingCookie by mutableStateOf(false)
     var isTestingProxy by mutableStateOf(false)
     var caffeineMode by mutableStateOf(false)
+    var trustDeviceClock by mutableStateOf(true)   // Skip NTP; trust Android's auto-synced clock
     var maxTriggers by mutableStateOf("4")
     var proxyAddress by mutableStateOf("")        // e.g. "socks5://127.0.0.1:1080"
     var timingOffsetMsStr by mutableStateOf("0")  // ±ms manual calibration offset
@@ -104,6 +105,7 @@ class UnlockViewModel : ViewModel() {
         timingOffsetMsStr = prefs.getString("timingOffsetMs", "0") ?: "0"
         bracketWidthMsStr = prefs.getString("bracketWidthMs", "50") ?: "50"
         maxTriggers       = prefs.getString("maxTriggers", "4") ?: "4"
+        trustDeviceClock  = prefs.getBoolean("trustDeviceClock", true)
     }
 
     private fun savePreferences() {
@@ -113,6 +115,7 @@ class UnlockViewModel : ViewModel() {
             .putString("timingOffsetMs", timingOffsetMsStr)
             .putString("bracketWidthMs", bracketWidthMsStr)
             .putString("maxTriggers", maxTriggers)
+            .putBoolean("trustDeviceClock", trustDeviceClock)
             .apply()
     }
 
@@ -247,11 +250,26 @@ class UnlockViewModel : ViewModel() {
             }
             log("[✓] Cookie is valid! Setting up... (baseline POST RTT: ${cookieRttMs}ms)")
 
-            // 2. Measure initial NTP
-            log("[NTP] Syncing clock initially...")
-            val offset = getNtpOffset()
-            ntpOffsetMs = offset
-            log("[NTP] Clock offset: ${offset}ms")
+            // 2. Clock sync
+            // NTP through cellular/asymmetric networks gives wrong offsets (e.g. +465ms when
+            // the device clock is actually accurate). Android auto-syncs the device clock to
+            // within ~50ms. "Trust Device Clock" uses offset=0 which is safer on 4G.
+            if (trustDeviceClock) {
+                ntpOffsetMs = 0L
+                log("[Clock] Trusting device clock (NTP skipped) — offset = 0ms")
+            } else {
+                log("[NTP] Syncing against 3 servers...")
+                val offset = getNtpOffset()
+                ntpOffsetMs = offset
+                if (kotlin.math.abs(offset) > 200L) {
+                    log("[⚠️ NTP] Large offset detected (${offset}ms)! On cellular/4G this is likely")
+                    log("[⚠️ NTP] measurement error from asymmetric latency — NOT true clock drift.")
+                    log("[⚠️ NTP] This would cause requests to arrive ${offset}ms OFF from midnight.")
+                    log("[⚠️ NTP] Consider enabling 'Trust Device Clock' to use offset=0 instead.")
+                } else {
+                    log("[NTP] Clock offset: ${offset}ms ✓")
+                }
+            }
 
             // Calculate target time (Next Beijing Midnight)
             val targetUtcMs = getNextBeijingMidnightMs()

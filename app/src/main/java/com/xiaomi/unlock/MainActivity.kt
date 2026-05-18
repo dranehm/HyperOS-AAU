@@ -171,7 +171,7 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
             // --- Cookie ---
             OutlinedTextField(
                 value = viewModel.cookie,
-                onValueChange = { viewModel.cookie = it },
+                onValueChange = { viewModel.cookie = it; viewModel.persistCookie() },
                 label = { Text("Cookie String") },
                 placeholder = { Text("Paste Cookie Here...") },
                 modifier = Modifier.fillMaxWidth(),

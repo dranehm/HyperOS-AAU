@@ -99,23 +99,33 @@ class UnlockViewModel : ViewModel() {
         loadPreferences()
     }
 
+    /** Called immediately when cookie text changes in UI — persists without needing to press Start. */
+    fun persistCookie() {
+        val prefs = appContext?.getSharedPreferences("unlock_prefs", Context.MODE_PRIVATE) ?: return
+        prefs.edit().putString("cookie", cookie).apply()
+    }
+
     private fun loadPreferences() {
         val prefs = appContext?.getSharedPreferences("unlock_prefs", Context.MODE_PRIVATE) ?: return
+        cookie            = prefs.getString("cookie", "") ?: ""
         proxyAddress      = prefs.getString("proxyAddress", "") ?: ""
         timingOffsetMsStr = prefs.getString("timingOffsetMs", "0") ?: "0"
         bracketWidthMsStr = prefs.getString("bracketWidthMs", "50") ?: "50"
         maxTriggers       = prefs.getString("maxTriggers", "4") ?: "4"
         trustDeviceClock  = prefs.getBoolean("trustDeviceClock", true)
+        caffeineMode      = prefs.getBoolean("caffeineMode", false)
     }
 
     private fun savePreferences() {
         val prefs = appContext?.getSharedPreferences("unlock_prefs", Context.MODE_PRIVATE) ?: return
         prefs.edit()
+            .putString("cookie", cookie)
             .putString("proxyAddress", proxyAddress)
             .putString("timingOffsetMs", timingOffsetMsStr)
             .putString("bracketWidthMs", bracketWidthMsStr)
             .putString("maxTriggers", maxTriggers)
             .putBoolean("trustDeviceClock", trustDeviceClock)
+            .putBoolean("caffeineMode", caffeineMode)
             .apply()
     }
 
@@ -333,16 +343,23 @@ class UnlockViewModel : ViewModel() {
             if(!isRunning) { releaseWakeLock(); return@launch } // cancelled
 
             // 4. Measure JIT Latency (HEAD to actual API path at 23:59:50)
-            log("[Latency] 23:59:50 reached! Measuring final latency...")
+            log("[Latency] 23:59:50 reached! Measuring final latency (parallel pings, 1.5s timeout)...")
             withContext(Dispatchers.Main) { countdownText = "Pinging..." }
             val headLat = measureLatency()
-            // Use the best available one-way latency estimate:
-            //   - cookieRttMs/2: real POST RTT measured earlier (includes CDN→backend)
-            //   - headLat/2: fresh HEAD RTT measured just now (CDN path only, but fresher)
-            // Take the larger of the two to avoid arriving too early.
-            val lat = maxOf(cookieRttMs, headLat) / 2
-            latencyMs = lat * 2 // Display the full RTT to the user
-            log("[Latency] HEAD min RTT: ${headLat}ms | POST RTT: ${cookieRttMs}ms → one-way estimate: ${lat}ms")
+
+            // Spike-poisoning guard: if all parallel pings timed out (server pre-midnight load),
+            // fall back to the cookie baseline RTT. Also cap any single measurement at 2000ms
+            // so a congestion spike can never delay firing by more than 1 second.
+            val effectiveCookieRtt = cookieRttMs.coerceAtMost(2000L)
+            val effectiveHeadLat = if (headLat == Long.MIN_VALUE) {
+                log("[Latency] ⚠️ All pings timed out! Falling back to cookie baseline RTT=${effectiveCookieRtt}ms")
+                effectiveCookieRtt
+            } else {
+                headLat.coerceAtMost(2000L)
+            }
+            val lat = maxOf(effectiveCookieRtt, effectiveHeadLat) / 2
+            latencyMs = lat * 2
+            log("[Latency] HEAD min RTT: ${if (headLat == Long.MIN_VALUE) "timeout" else "${headLat}ms"} | POST RTT: ${cookieRttMs}ms | capped one-way estimate: ${lat}ms")
 
             // 5. Calculate Spam Bracket Timings
             val triggerCount = (maxTriggers.toIntOrNull() ?: 4).coerceAtLeast(1)
@@ -499,25 +516,40 @@ class UnlockViewModel : ViewModel() {
     }
 
     private fun measureLatency(): Long {
-        // Target the actual API path (not root) so the measurement reflects
-        // the full CDN→backend round trip, not just the CDN edge response.
-        val times = mutableListOf<Long>()
-        for (i in 1..5) {
-            try {
-                val t0 = System.currentTimeMillis()
-                val req = Request.Builder().url(unlockUrl).head().build()
-                client.newBuilder().callTimeout(5, java.util.concurrent.TimeUnit.SECONDS).build().newCall(req).execute().close()
-                times.add(System.currentTimeMillis() - t0)
-            } catch (e: Exception) {
-                // Ignore failure
+        // Run 5 pings IN PARALLEL with a tight 1500ms per-ping timeout.
+        // Sequential pings with long timeouts caused 38s blocking during server load spikes
+        // (5 × 7598ms), firing waves 14s after midnight. Parallel + short timeout prevents this.
+        val PING_TIMEOUT_MS = 1500L
+        val pingClient = client.newBuilder()
+            .callTimeout(PING_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .connectTimeout(PING_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .readTimeout(PING_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            .build()
+
+        val times = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(5)
+        val futures = (1..5).map {
+            executor.submit<Unit> {
+                try {
+                    val t0 = System.currentTimeMillis()
+                    val req = Request.Builder().url(unlockUrl).head().build()
+                    pingClient.newCall(req).execute().close()
+                    val rtt = System.currentTimeMillis() - t0
+                    if (rtt < PING_TIMEOUT_MS) times.add(rtt)  // discard timed-out stragglers
+                } catch (_: Exception) {}
             }
         }
-        // Use minimum (best-case RTT, closest to true network latency without queuing jitter)
+        // Wait max 1600ms total for all parallel pings (plenty for 1500ms timeout)
+        futures.forEach { try { it.get(1600, java.util.concurrent.TimeUnit.MILLISECONDS) } catch (_: Exception) {} }
+        executor.shutdownNow()
+
         return if (times.isNotEmpty()) {
-            times.minOrNull()!!
+            val min = times.minOrNull()!!
+            log("[Latency] Parallel pings (${times.size}/5 responded): min=${min}ms, samples=${times.sorted()}")
+            min
         } else {
-            log("[Latency] Could not measure — defaulting to 300ms")
-            300L
+            log("[Latency] All pings timed out (server load spike) — using cookie baseline")
+            Long.MIN_VALUE  // Signal to caller: use cookieRttMs instead
         }
     }
 

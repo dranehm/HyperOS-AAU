@@ -269,7 +269,7 @@ def main():
     results = []
     with ThreadPoolExecutor(max_workers=args.waves) as pool:
         futures = {
-            pool.submit(fire_shot, i+1, args.cookie, args.proxy, fire_times[i], _shared_client): i
+            pool.submit(fire_shot, i+1, args.cookie, args.proxy, fire_times[i]): i
             for i in range(args.waves)
         }
         for future in as_completed(futures):

@@ -14,7 +14,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -95,182 +97,186 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun UnlockScreen(viewModel: UnlockViewModel) {
     val listState = rememberLazyListState()
+    val controlsScrollState = rememberScrollState()
 
-    // Auto-scroll to bottom when logs update
+    // Auto-scroll log to bottom when new entries arrive
     LaunchedEffect(viewModel.logs.size) {
         if (viewModel.logs.isNotEmpty()) {
             listState.animateScrollToItem(viewModel.logs.size - 1)
         }
     }
 
+    // Outer column: scrollable controls on top, fixed log at bottom
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+            .padding(horizontal = 16.dp, vertical = 8.dp)
     ) {
-        // --- Header ---
-        Text(
-            text = "Xiaomi Unlock Automator",
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = OrangeMain,
-            modifier = Modifier.padding(bottom = 24.dp, top = 24.dp)
-        )
-
-        // --- Status Cards Section ---
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            StatusCard(
-                title = "Latency",
-                value = viewModel.latencyMs?.let { "${it}ms" } ?: "--"
-            )
-            StatusCard(
-                title = "NTP Offset",
-                value = viewModel.ntpOffsetMs?.let { "${it}ms" } ?: "--"
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // --- Caffeine Mode Toggle ---
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = if (viewModel.caffeineMode) Color(0xFF2A1F00) else SurfaceColor
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column {
-                    Text(
-                        text = "☕ Caffeine Mode",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (viewModel.caffeineMode) OrangeMain else Color.White
-                    )
-                    Text(
-                        text = "Keep screen awake during process",
-                        fontSize = 11.sp,
-                        color = TextGray
-                    )
-                }
-                Switch(
-                    checked = viewModel.caffeineMode,
-                    onCheckedChange = { viewModel.caffeineMode = it },
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = OrangeMain,
-                        uncheckedThumbColor = TextGray,
-                        uncheckedTrackColor = SurfaceColor
-                    )
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // --- Countdown Display ---
-        Text(
-            text = viewModel.countdownText,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-            color = if (viewModel.isRunning) OrangeMain else Color.White,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(bottom = 16.dp).fillMaxWidth()
-        )
-
-        // --- Cookie Input ---
-        OutlinedTextField(
-            value = viewModel.cookie,
-            onValueChange = { viewModel.cookie = it },
-            label = { Text("Cookie String") },
-            placeholder = { Text("Paste Cookie Here...") },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !viewModel.isRunning,
-            singleLine = true,
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = OrangeMain,
-                focusedLabelColor = OrangeMain,
-                cursorColor = OrangeMain
-            )
-        )
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // --- Max Triggers Input ---
-        OutlinedTextField(
-            value = viewModel.maxTriggers,
-            onValueChange = { newVal ->
-                if (newVal.isEmpty() || newVal.all { it.isDigit() }) {
-                    viewModel.maxTriggers = newVal
-                }
-            },
-            label = { Text("Max Triggers") },
-            placeholder = { Text("4") },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !viewModel.isRunning,
-            singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = OrangeMain,
-                focusedLabelColor = OrangeMain,
-                cursorColor = OrangeMain
-            )
-        )
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // --- Action Buttons ---
-        if (!viewModel.isRunning) {
-            Button(
-                onClick = { viewModel.startProcess() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = OrangeMain)
-            ) {
-                Text("Verify & Start Process", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            }
-        } else {
-            Button(
-                onClick = { viewModel.stopProcess() },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
-            ) {
-                Text("Abort Process", fontSize = 16.sp, fontWeight = FontWeight.Bold)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // --- Wave Indicators ---
-        if (viewModel.waves.isNotEmpty()) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly
-            ) {
-                viewModel.waves.forEach { wave ->
-                    WaveCard(wave)
-                }
-            }
-        }
-
-        // --- Log Console ---
-        Box(
+        // ── Controls section (scrollable) ──────────────────────────────────
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
+                .verticalScroll(controlsScrollState),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // --- Header ---
+            Text(
+                text = "Xiaomi Unlock Automator",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                color = OrangeMain,
+                modifier = Modifier.padding(vertical = 8.dp)
+            )
+
+            // --- Status Cards ---
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StatusCard("Latency",   viewModel.latencyMs?.let  { "${it}ms" } ?: "--", Modifier.weight(1f))
+                StatusCard("NTP Offset",viewModel.ntpOffsetMs?.let { "${it}ms" } ?: "--", Modifier.weight(1f))
+                StatusCard("Proxy RTT", viewModel.proxyRttMs?.let  { "${it}ms" } ?: "--", Modifier.weight(1f))
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // --- Mode Toggles ---
+            ModeToggle(
+                icon = "☕", label = "Caffeine Mode", sub = "Keep screen awake",
+                checked = viewModel.caffeineMode,
+                active = viewModel.caffeineMode,
+                onToggle = { viewModel.caffeineMode = it }
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            ModeToggle(
+                icon = "🕐", label = "Trust Device Clock", sub = "Skip NTP (safe on 4G/cellular)",
+                checked = viewModel.trustDeviceClock,
+                active = viewModel.trustDeviceClock,
+                onToggle = { viewModel.trustDeviceClock = it }
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // --- Countdown ---
+            Text(
+                text = viewModel.countdownText,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (viewModel.isRunning) OrangeMain else Color.White,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp)
+            )
+
+            // --- Cookie ---
+            OutlinedTextField(
+                value = viewModel.cookie,
+                onValueChange = { viewModel.cookie = it; viewModel.persistCookie() },
+                label = { Text("Cookie String") },
+                placeholder = { Text("Paste Cookie Here...") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !viewModel.isRunning,
+                singleLine = true,
+                colors = orangeFieldColors()
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // --- Config Row: Triggers + Bracket + Offset ---
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedTextField(
+                    value = viewModel.maxTriggers,
+                    onValueChange = { if (it.isEmpty() || it.all { c -> c.isDigit() }) viewModel.maxTriggers = it },
+                    label = { Text("Triggers") }, placeholder = { Text("4") },
+                    modifier = Modifier.weight(1f), enabled = !viewModel.isRunning, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = orangeFieldColors()
+                )
+                OutlinedTextField(
+                    value = viewModel.bracketWidthMsStr,
+                    onValueChange = { if (it.isEmpty() || it.all { c -> c.isDigit() }) viewModel.bracketWidthMsStr = it },
+                    label = { Text("Bracket ms") }, placeholder = { Text("50") },
+                    modifier = Modifier.weight(1f), enabled = !viewModel.isRunning, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = orangeFieldColors()
+                )
+                OutlinedTextField(
+                    value = viewModel.timingOffsetMsStr,
+                    onValueChange = { nv -> if (nv.isEmpty() || nv == "-" || nv.toLongOrNull() != null) viewModel.timingOffsetMsStr = nv },
+                    label = { Text("Offset ms") }, placeholder = { Text("0") },
+                    modifier = Modifier.weight(1f), enabled = !viewModel.isRunning, singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    colors = orangeFieldColors()
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // --- Proxy Row ---
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                OutlinedTextField(
+                    value = viewModel.proxyAddress,
+                    onValueChange = { viewModel.proxyAddress = it },
+                    label = { Text("Proxy (optional)") },
+                    placeholder = { Text("socks5://127.0.0.1:1080") },
+                    modifier = Modifier.weight(1f),
+                    enabled = !viewModel.isRunning, singleLine = true,
+                    colors = orangeFieldColors()
+                )
+                Button(
+                    onClick = { viewModel.testProxy() },
+                    enabled = !viewModel.isTestingProxy && !viewModel.isRunning,
+                    colors = ButtonDefaults.buttonColors(containerColor = OrangeMain),
+                    modifier = Modifier.height(54.dp)
+                ) {
+                    Text(if (viewModel.isTestingProxy) "..." else "Test", fontSize = 13.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // --- Action Button ---
+            if (!viewModel.isRunning) {
+                Button(
+                    onClick = { viewModel.startProcess() },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = OrangeMain)
+                ) {
+                    Text("Verify & Start Process", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
+            } else {
+                Button(
+                    onClick = { viewModel.stopProcess() },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color.Red)
+                ) {
+                    Text("Abort Process", fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            // --- Wave Indicators ---
+            if (viewModel.waves.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    viewModel.waves.forEach { wave -> WaveCard(wave) }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // ── Log Console (fixed height, always visible) ─────────────────────
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(200.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(Color.Black)
                 .padding(8.dp)
@@ -279,10 +285,10 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
                 items(viewModel.logs) { logMsg ->
                     Text(
                         text = logMsg,
-                        color = Color(0xFF00FF00), // Terminal green
-                        fontSize = 12.sp,
+                        color = Color(0xFF00FF00),
+                        fontSize = 11.sp,
                         fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(vertical = 2.dp)
+                        modifier = Modifier.padding(vertical = 1.dp)
                     )
                 }
             }
@@ -291,24 +297,65 @@ fun UnlockScreen(viewModel: UnlockViewModel) {
 }
 
 @Composable
-fun StatusCard(title: String, value: String) {
+private fun ModeToggle(
+    icon: String, label: String, sub: String,
+    checked: Boolean, active: Boolean,
+    onToggle: (Boolean) -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (active) Color(0xFF1A2A1A) else SurfaceColor
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column {
+                Text(
+                    text = "$icon $label", fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    color = if (active) OrangeMain else Color.White
+                )
+                Text(text = sub, fontSize = 11.sp, color = TextGray)
+            }
+            Switch(
+                checked = checked, onCheckedChange = onToggle,
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = Color.White, checkedTrackColor = OrangeMain,
+                    uncheckedThumbColor = TextGray, uncheckedTrackColor = SurfaceColor
+                )
+            )
+        }
+    }
+}
+
+@Composable
+private fun orangeFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = OrangeMain,
+    focusedLabelColor = OrangeMain,
+    cursorColor = OrangeMain
+)
+
+@Composable
+fun StatusCard(title: String, value: String, modifier: Modifier = Modifier) {
     Card(
         colors = CardDefaults.cardColors(containerColor = SurfaceColor),
         elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
-        modifier = Modifier
-            .width(150.dp)
-            .height(80.dp)
+        modifier = modifier.height(64.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(8.dp),
+                .padding(6.dp),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(text = title, fontSize = 12.sp, color = TextGray)
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(text = value, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = Color.White)
+            Text(text = title, fontSize = 10.sp, color = TextGray)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(text = value, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color.White)
         }
     }
 }

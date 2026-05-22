@@ -28,6 +28,7 @@ import sys
 import time
 from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional, Tuple
 
 try:
     import httpx
@@ -82,7 +83,7 @@ def get_ntp_offset_ms() -> float:
     return med
 
 # ── Latency measurement ────────────────────────────────────────────────────────
-def measure_latency_ms(cookie: str, proxy_url: str | None, n=5) -> float:
+def measure_latency_ms(cookie: str, proxy_url: Optional[str], n=5) -> float:
     """Fire n HEAD requests to target, return minimum RTT/2 (one-way estimate)."""
     headers = _build_headers(cookie)
     rtts = []
@@ -116,7 +117,7 @@ def _build_headers(cookie: str) -> dict:
         "User-Agent": USER_AGENT,
     }
 
-def test_cookie(cookie: str, proxy_url: str | None) -> tuple[bool, int]:
+def test_cookie(cookie: str, proxy_url: Optional[str]) -> Tuple[bool, int]:
     """Returns (is_valid, apply_result). result=3 means waiting, 1=approved, 6=quota."""
     headers = _build_headers(cookie)
     transport = httpx.HTTPTransport(proxy=proxy_url) if proxy_url else None
@@ -135,16 +136,19 @@ def test_cookie(cookie: str, proxy_url: str | None) -> tuple[bool, int]:
         log(red(f"[Cookie Test] FAILED: {e}"))
         return False, -1
 
-def fire_shot(wave_id: int, cookie: str, proxy_url: str | None, fire_at_ns: int) -> dict:
+def fire_shot(wave_id: int, cookie: str, proxy_url: Optional[str], fire_at_ns: int) -> dict:
     """Sleep until fire_at_ns, then POST. Returns result dict."""
     headers = _build_headers(cookie)
     transport = httpx.HTTPTransport(proxy=proxy_url) if proxy_url else None
     
-    # Busy-wait for precision
-    while time.monotonic_ns() < fire_at_ns - 2_000_000:  # wake 2ms early
-        time.sleep(0.0005)
+    # Sleep until 20ms before fire, then spin.
+    # NOTE: On single-vCPU VPS, keep --waves ≤8 to avoid GIL contention
+    # across competing spin-loops (32 threads × ~5ms GIL quantum = 160ms+ drift).
+    sleep_until = fire_at_ns - 20_000_000  # wake 20ms early
+    while time.monotonic_ns() < sleep_until:
+        time.sleep(0.001)  # 1ms sleeps — accurate enough, low CPU
     while time.monotonic_ns() < fire_at_ns:
-        pass  # spin the last 2ms
+        pass  # spin the last 20ms
     
     send_time = datetime.now(BEIJING_TZ).strftime("%H:%M:%S.%f")[:-3]
     t0 = time.monotonic_ns()
@@ -166,7 +170,7 @@ def fire_shot(wave_id: int, cookie: str, proxy_url: str | None, fire_at_ns: int)
         return {"wave": wave_id, "result": -1, "error": str(e)}
 
 # ── Pre-warm keepalive ────────────────────────────────────────────────────────
-def prewarm(cookie: str, proxy_url: str | None, until_ns: int):
+def prewarm(cookie: str, proxy_url: Optional[str], until_ns: int):
     """Send HEAD pings every 5s until 2s before fire time to keep TCP alive."""
     headers = _build_headers(cookie)
     transport = httpx.HTTPTransport(proxy=proxy_url) if proxy_url else None
